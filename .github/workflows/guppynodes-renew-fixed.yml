@@ -1,0 +1,108 @@
+name: GuppyNodes Auto Renew
+
+on:
+  schedule:
+    # 每月 1、8、15、22、29 日 UTC 02:00 运行
+    - cron: "0 2 */7 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: guppynodes-auto-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 从私有仓库仅拉取 guppynodes.py
+        uses: actions/checkout@v6
+        with:
+          repository: vipcd/zhuanshu-jiaoben
+          ref: main
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private-script
+          sparse-checkout: |
+            guppynodes.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 检查私有脚本
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f private-script/guppynodes.py ]; then
+            echo "::error::私有仓库 main 分支根目录中未找到 guppynodes.py"
+            find private-script -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+          echo "已找到 private-script/guppynodes.py"
+
+      - name: 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖与 Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install playwright requests
+          python -m playwright install --with-deps chromium
+
+      - name: 运行 guppynodes.py
+        env:
+          GUPPY_EMAIL: ${{ secrets.GUPPY_EMAIL }}
+          GUPPY_PASSWORD: ${{ secrets.GUPPY_PASSWORD }}
+          GUPPY_SERVICE_URL: https://billing.guppynodes.com/services/308
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SCREENSHOT_DIR: screenshots
+        shell: bash
+        run: python private-script/guppynodes.py
+
+      - name: 上传运行截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guppynodes-screenshot-${{ github.run_id }}
+          path: screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 删除旧工作流运行记录，仅保留当前记录
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        shell: bash
+        run: |
+          set -u
+
+          workflow_file="${WORKFLOW_REF#*/.github/workflows/}"
+          workflow_file="${workflow_file%@*}"
+
+          echo "工作流文件: ${workflow_file}"
+          echo "当前运行 ID: ${CURRENT_RUN_ID}"
+
+          gh api --paginate             -H "Accept: application/vnd.github+json"             "/repos/${REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=100"             --jq ".workflow_runs[] | select((.id | tostring) != "${CURRENT_RUN_ID}") | select(.status == "completed") | .id"             > old-run-ids.txt
+
+          if [ ! -s old-run-ids.txt ]; then
+            echo "没有需要删除的旧运行记录"
+            exit 0
+          fi
+
+          while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
+            echo "删除旧运行记录: ${run_id}"
+            gh api --method DELETE               -H "Accept: application/vnd.github+json"               "/repos/${REPOSITORY}/actions/runs/${run_id}" || true
+          done < old-run-ids.txt
