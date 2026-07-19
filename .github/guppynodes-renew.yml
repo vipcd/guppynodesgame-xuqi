@@ -2,7 +2,8 @@ name: GuppyNodes Auto Renew
 
 on:
   schedule:
-   - cron: "0 2 */7 * *"
+    # 每月 1、8、15、22、29 日 UTC 02:00 运行
+    - cron: "0 2 */7 * *"
   workflow_dispatch:
 
 permissions:
@@ -31,14 +32,26 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: 检查私有脚本
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f private-script/guppynodes.py ]; then
+            echo "::error::私有仓库 main 分支根目录中未找到 guppynodes.py"
+            find private-script -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+          echo "已找到 private-script/guppynodes.py"
+
       - name: 设置 Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: 安装依赖与 Chromium
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install playwright requests
           python -m playwright install --with-deps chromium
@@ -51,6 +64,7 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SCREENSHOT_DIR: screenshots
+        shell: bash
         run: python private-script/guppynodes.py
 
       - name: 上传运行截图
@@ -62,8 +76,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: 删除本工作流的旧运行记录，仅保留当前记录
+      - name: 删除旧工作流运行记录，仅保留当前记录
         if: always()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_RUN_ID: ${{ github.run_id }}
@@ -71,22 +86,23 @@ jobs:
           WORKFLOW_REF: ${{ github.workflow_ref }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
+
           workflow_file="${WORKFLOW_REF#*/.github/workflows/}"
           workflow_file="${workflow_file%@*}"
 
-          page=1
-          while :; do
-            ids="$(gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "/repos/${REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=100&page=${page}" \
-              --jq ".workflow_runs[] | select((.id | tostring) != \"${CURRENT_RUN_ID}\" and .status == \"completed\") | .id")"
+          echo "工作流文件: ${workflow_file}"
+          echo "当前运行 ID: ${CURRENT_RUN_ID}"
 
-            [ -z "$ids" ] && break
-            while IFS= read -r run_id; do
-              [ -n "$run_id" ] || continue
-              echo "Deleting completed workflow run: $run_id"
-              gh api --method DELETE "/repos/${REPOSITORY}/actions/runs/${run_id}"
-            done <<< "$ids"
-            page=$((page + 1))
-          done
+          gh api --paginate             -H "Accept: application/vnd.github+json"             "/repos/${REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=100"             --jq ".workflow_runs[] | select((.id | tostring) != "${CURRENT_RUN_ID}") | select(.status == "completed") | .id"             > old-run-ids.txt
+
+          if [ ! -s old-run-ids.txt ]; then
+            echo "没有需要删除的旧运行记录"
+            exit 0
+          fi
+
+          while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
+            echo "删除旧运行记录: ${run_id}"
+            gh api --method DELETE               -H "Accept: application/vnd.github+json"               "/repos/${REPOSITORY}/actions/runs/${run_id}" || true
+          done < old-run-ids.txt
