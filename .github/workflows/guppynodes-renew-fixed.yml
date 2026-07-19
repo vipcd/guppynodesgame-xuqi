@@ -65,7 +65,8 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SCREENSHOT_DIR: screenshots
         shell: bash
-        run: python private-script/guppynodes.py
+        # 底层击穿关键修改点：添加 xvfb-run 以支持有头浏览器模式正常伪装运行
+        run: xvfb-run python private-script/guppynodes.py
 
       - name: 上传运行截图
         if: always()
@@ -94,7 +95,11 @@ jobs:
           echo "工作流文件: ${workflow_file}"
           echo "当前运行 ID: ${CURRENT_RUN_ID}"
 
-          gh api --paginate             -H "Accept: application/vnd.github+json"             "/repos/${REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=100"             --jq ".workflow_runs[] | select((.id | tostring) != "${CURRENT_RUN_ID}") | select(.status == "completed") | .id"             > old-run-ids.txt
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=100" \
+            --jq ".workflow_runs[] | select((.id | tostring) != \"${CURRENT_RUN_ID}\") | select(.status == \"completed\") | .id" \
+            > old-run-ids.txt
 
           if [ ! -s old-run-ids.txt ]; then
             echo "没有需要删除的旧运行记录"
@@ -104,5 +109,7 @@ jobs:
           while IFS= read -r run_id; do
             [ -n "$run_id" ] || continue
             echo "删除旧运行记录: ${run_id}"
-            gh api --method DELETE               -H "Accept: application/vnd.github+json"               "/repos/${REPOSITORY}/actions/runs/${run_id}" || true
+            gh api --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${REPOSITORY}/actions/runs/${run_id}" || true
           done < old-run-ids.txt
