@@ -3,7 +3,7 @@ name: GuppyNodes Auto Renew
 on:
   schedule:
     # 每月 1、8、15、22、29 日 UTC 02:00 运行
-    - cron: "0 2 */7 * *"
+    - cron: "0 2 */2 * *"
   workflow_dispatch:
 
 permissions:
